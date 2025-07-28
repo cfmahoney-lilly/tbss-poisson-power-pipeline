@@ -1,0 +1,154 @@
+---
+title: "TBSS Poisson Power Calculation"
+author: "Catherine Mahoney"
+format: pdf
+editor: visual
+---
+
+## Power calculation for tree-based scan statistics with a Poisson probability model
+
+This pipeline automates the calculation of power for tree-based scan statistics used in pharmacovigilance using the recently published, open-source implementation in the package `TBSS`. This version uses a Poisson probability model. To evaluate the power of the tree-based scan statistic, it implements a plasmode simulation procedure to introduce known elevation in relative risk, as well as a generic stratification procedure for the estimation of background rates, then calculate the proportion of trials in which the simulated node alerts. The pipeline uses the `targets` and `crew` packages to manage the parallel simulations and subsequent calculations.
+
+## Input data
+
+The specification of the precise study design, including inclusion/exclusion criteria, baseline period, and observation period are out of the scope of this pipeline. It is assumed that the user has created the cohorts according to their selected design and formatted the table as below, with a column for *id*, *treatment_group*, each relevant covariate, and a single *outcome* column with one row for each patient-outcome combination.
+
+This vignette uses a simulated data set of treatment group, covariates, and outcomes from a subset of ICD-10-CM diagnosis codes corresponding to diseases of the respiratory system (J00-J99). The subset of codes is used for demonstration purposes to reduce run time.
+
+### Sample input data
+
+| id  | treatment_group | cov_1 | cov_2 | ... | outcome |
+|-----|-----------------|-------|-------|-----|---------|
+| 1   | 1               | 0     | 1     | ... | A047    |
+| 1   | 1               | 0     | 1     | ... | J459    |
+| 1   | 1               | 0     | 1     | ... | E119    |
+| 2   | 0               | 1     | 0     | ... | M545    |
+| 2   | 0               | 1     | 0     | ... | F321    |
+
+### Tree-structured variable
+
+Tree-based scan statistics leverage the hierarchical nature of coding systems such as ICD-10-CM to test for excess risk as multiple resolutions. TBSS requires that the tree be formatted with a *parent* and *child* column, as shown below:
+
+| child | parent |
+|-------|--------|
+| J040  | J04    |
+| J041  | J04    |
+| J0410 | J041   |
+| J0411 | J041   |
+
+The function `tree_builder()`, contained in the repository, accepts a vector of codes and generates an appropriately formatted tree-structured variable.
+
+## Pipeline steps
+
+The example pipeline is detailed in the \_targets.R file, and each target and corresponding function or input contains comments to guide users in incorporating their own data and study design choices. Briefly, the steps in each simulation are as follows:
+
+1.  `select_subsample()` Select treatment and comparator groups of the desired size; this example selects 1,000 treatment and 1,000 comparator patients
+
+2.  `plasmode()` Introduce known elevation in relative risk of an outcome using plasmode simulation. This example uses a relative risk of 2. The user can decide whether to select a specific outcome in which to simulate excess risk or to specify a target incidence rate for the outcome to enrich and allow the function to selcet the outcome randomly. In this instance, a target incidence of .01 is specified.
+
+3.  `ps_strat()` Stratify the data based on a user-defined propensity score function and number of strata as defined in `strat_params.R` to calculate expected outcome rates. In this example, the propensity score is computed as a logistic regression using sample baseline data corresponding to categories from the Elixhauser comorbidity index, but users should customise to their own study and may choose to introduce potential confounding through choice of propensity score parameters. There are ten strata in this example but this parameter is also customisable.
+
+4.  `tbss_mask()` Apply TBSS to determine if the simulated elevation in risk is detected while preventing detection of unrelated statistical alerts.
+
+This process is repeated many times to determine the power, calculated as the proportion of simulations wherein the simulated excess risk is detected. The example uses only 10 simulations for demonstration purposes; suitable numbers will vary by application, but 1,000 may be a good reference point. The package `crew` manages parallelisation. In this example, only two workers are used, but the user can customise to their own computer system.
+
+## Modifying `strat_params.R`
+
+To specify the parameters for the stratification and estimation of expected outcome rates, the user must modify the parameters in the `strat_params.R` script.
+
+The sample arguments correspond to a binomial GLM with a logit link function, but the user can specify any valid arguments to `glm()` in the `strat_args` list, along with the desired number of strata.
+
+```{r, eval = F, echo = F}
+# propensity score formula
+ps_form <- as.formula(treatment_group ~ gender + age + chf + carit + valv + pcd + 
+                        pvd + hypunc + hypc + para + ond + cpd + diabunc + 
+                        diabc + hypothy + rf + ld + pud + aids + lymph + 
+                        metacanc + solidtum + rheumd + coag + obes + wloss + 
+                        fed + blane + dane + alcohol + drug + psycho + depre)
+
+# specify number of strata:
+n_strata <- 10
+
+#add glm parameters as required
+strat_args <- list(
+  formula = ps_form,
+  family = binomial(),
+  n_strata = n_strata
+)
+```
+
+## Contents of the `_targets.R` script
+
+The script `_targets.R` directs the flow of work in the pipeline. Once the stratification parameters in `strat_params.R` have been specified, lines with a comment can be customised to required inputs and file locations for input and tree data.
+
+```{r, results = "hide"}
+
+library(targets)
+library(crew)
+
+tar_source() #configure metadata with matching parameters
+tar_option_set(packages = c("readr", "dplyr", "tidyr", "TBSS"),
+               controller = crew_controller_local(workers = 2) #specify workers
+)
+
+list(
+  tar_target(file, 
+             "data/test_data_j.csv",    #location of your outcome data
+             format = "file"
+  ),
+  tar_target(data, 
+             get_data(file)
+  ),
+  tar_target(iteration_id, 
+             1:10                        #specify number of replicates
+  ),
+  tar_target(subsample, 
+             select_subsample(data, 1000, 1000), #specify sample sizes
+             pattern = map(iteration_id)
+  ),
+  tar_target(sim_data, 
+             plasmode(subsample,
+                      target_outcome = NULL, #specify either outcome or incidence
+                      target_inc = .01, 
+                      rr=2),                 #specify relative risk
+             pattern = map(subsample)
+  ),
+  tar_target(ps_data,
+             ps_strat(sim_data,
+                      strat_args),
+             pattern = map(sim_data)
+  ),
+  tar_target(tree_file, 
+             'data/test_tree.csv',                   #include tree file location
+             format = "file"
+  ),
+  tar_target(tree, 
+             get_data(tree_file)
+  ),
+  tar_target(tbss, 
+             tbss_mask(ps_data, 
+                       model = "poisson",
+                       tree), 
+             pattern = map(ps_data)
+  ),
+  tar_target(final_vector, 
+             unlist(tbss)
+  ),
+  tar_target(final_power, 
+             print(mean(final_vector))
+  )
+  
+)
+```
+
+## Running the pipeline
+
+Run `tar_make()` to launch the pipeline. The output will enumerate each target and show which branches were already up-to-date. Finally, `tar_read(final_power)` will display the result of the complete power calculation. Here, TBSS had 20% power to detect an outcome with an incidence of .01 and a relative risk of 2.
+
+```{r, warning=FALSE}
+tar_make()
+```
+
+```{r, echo = F}
+print(paste0("Final power: ", tar_read(final_power)))
+```

@@ -1,0 +1,20 @@
+Package: treeval
+Title: Pipeline for Power Evaluation of Tree-Based Scan Statistics
+Version: 0.0.1
+Authors@R: c(
+    person(
+      given = "Catherine", 
+      family = "Mahoney", 
+      email = "catherine.mahoney@lilly.com", 
+      role = c("aut", "cre")
+    ),
+    person(
+      family = "Eli Lilly and Company", 
+      role = "cph"
+    ))
+Description: A targets pipeline for the evaluation of power of tree-based scan 
+statistics used in pharmacovigilance.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.3.2
